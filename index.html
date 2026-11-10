@@ -1,0 +1,765 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Hover League</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; overscroll-behavior: none; background: #12082a; }
+  body { font: 15px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color: #fff; user-select: none; -webkit-user-select: none; }
+  canvas { display: block; touch-action: none; }
+  .hud { position: fixed; pointer-events: none; text-shadow: 0 0 10px #000c, 0 2px 4px #0009; font-weight: 800; }
+  #pos { top: max(12px, env(safe-area-inset-top)); left: max(16px, env(safe-area-inset-left)); font-size: 42px; line-height: 1; font-style: italic; }
+  #pos small { font-size: 18px; opacity: .85; }
+  #lap { top: calc(max(12px, env(safe-area-inset-top)) + 48px); left: max(16px, env(safe-area-inset-left)); font-size: 16px; }
+  #speed { top: max(12px, env(safe-area-inset-top)); right: max(16px, env(safe-area-inset-right)); text-align: right; font-size: 34px; line-height: 1; font-style: italic; font-variant-numeric: tabular-nums; }
+  #speed small { font-size: 13px; opacity: .8; }
+  #boostbar { margin: 6px 0 0 auto; width: 120px; height: 8px; border-radius: 4px; background: #ffffff26; overflow: hidden; }
+  #boostbar i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, #3df5ff, #ff3df0); }
+  #net { bottom: max(10px, env(safe-area-inset-bottom)); left: 50%; transform: translateX(-50%); font-size: 12px; font-weight: 600; opacity: .8; white-space: nowrap; }
+  #hint { bottom: calc(max(10px, env(safe-area-inset-bottom)) + 26px); left: 0; right: 0; text-align: center; font-size: 16px; padding: 0 16px; }
+  body.touch #net { bottom: calc(max(16px, env(safe-area-inset-bottom)) + 84px); }
+  body.touch #hint { bottom: calc(max(16px, env(safe-area-inset-bottom)) + 104px); }
+  #count { inset: 0; display: grid; place-items: center; font-size: min(26vw, 180px); font-style: italic; color: #3df5ff; text-shadow: 0 0 30px #3df5ff, 0 0 6px #fff; }
+  #msg { top: 26%; left: 0; right: 0; text-align: center; font-size: 30px; color: #ffd23f; transition: opacity .3s, transform .3s; opacity: 0; transform: scale(.85); }
+  #msg.on { opacity: 1; transform: scale(1); }
+  #over { position: fixed; inset: 0; display: grid; place-items: center; background: #0a041c88; }
+  #over[hidden], .pad[hidden] { display: none; }
+  .card { width: min(380px, 90vw); max-height: 86vh; overflow: auto; padding: 20px; border-radius: 16px; background: #1a0f3af2; border: 1px solid #3df5ff55; box-shadow: 0 0 40px #ff3df033; box-sizing: border-box; }
+  .card h2 { margin: 0 0 8px; font-size: 22px; font-style: italic; }
+  .card h3 { margin: 14px 0 4px; font-size: 14px; color: #3df5ff; }
+  .card ol { margin: 0; padding-left: 24px; font-size: 14px; }
+  .card li span { float: right; font-variant-numeric: tabular-nums; }
+  .card li.me { color: #ffd23f; font-weight: 700; }
+  .card li.note { list-style: none; margin-left: -24px; opacity: .8; }
+  .card p { margin: 12px 0 0; font-size: 13px; opacity: .8; }
+  button.go { width: 100%; min-height: 48px; margin-top: 14px; border: 0; border-radius: 12px; background: linear-gradient(90deg, #3df5ff, #ff3df0); color: #12082a; font: 800 17px system-ui, sans-serif; cursor: pointer; }
+  .pad { position: fixed; bottom: max(16px, env(safe-area-inset-bottom)); display: flex; gap: 12px; }
+  .pad button { width: 76px; height: 76px; border-radius: 50%; border: 2px solid #3df5ffaa; background: #12082a55; color: #fff; font: 800 15px system-ui, sans-serif; touch-action: none; }
+  .pad button.on { background: #3df5ff66; }
+  #padL { left: max(16px, env(safe-area-inset-left)); } #padR { right: max(16px, env(safe-area-inset-right)); }
+</style>
+<script src="https://cdn.multiplayeragent.com/sdk/mp.global.js"></script>
+<script type="importmap">{ "imports": { "three": "./libs/three.module.min.js" } }</script>
+</head>
+<body>
+<div class="hud" id="pos"></div>
+<div class="hud" id="lap"></div>
+<div class="hud" id="speed"></div>
+<div class="hud" id="hint"></div>
+<div class="hud" id="net">Connecting…</div>
+<div class="hud" id="count"></div>
+<div class="hud" id="msg"></div>
+<div class="pad" id="padL" hidden><button data-k="left">◀</button><button data-k="right">▶</button></div>
+<div class="pad" id="padR" hidden><button data-k="brake">BRAKE</button></div>
+<div id="over" hidden><div class="card">
+  <h2>Results</h2><ol id="results"></ol>
+  <h3>Best laps on this track</h3><ol id="board"><li class="note">Loading…</li></ol>
+  <button class="go" id="again">Race again</button>
+  <p id="next"></p>
+</div></div>
+<script type="module">
+/* ═══ HOVER LEAGUE · a Multiplayer Agent starter ═══════════════════════════════════════
+ * Neon hovercraft race three laps of a floating figure-eight track. Versus, 2–8 players;
+ * bots fill empty seats.
+ *
+ * WHERE THINGS ARE (search for the "── " headers):
+ *   CONFIG ........ laps, speeds, handling, the track's shape, boost pads, bots
+ *   CONNECTION .... MP_CONNECT, joining, the offline room, who is host
+ *   TRACK ......... the track's curve, banking, and "track space" (how far along, how far left)
+ *   WORLD ......... the sky, the road, rails, arches, boost pads, sparks
+ *   CRAFT ......... the hovercraft model and name tags
+ *   RACE (HOST) ... the race phases (grid, race, done) and the bots. Only the host writes these.
+ *   MY CRAFT ...... steering, sliding, walls, boost pads, laps. Each player writes only its own.
+ *   HUD & RESULTS . position, laps, speed, countdown, results, leaderboard
+ *   INPUT ......... keyboard and touch
+ *
+ * HOW THE MULTIPLAYER WORKS (a relay room: no server code):
+ *   - Every craft lives in TRACK SPACE: f = how far along the track (a point index), u = how
+ *     far left of the middle, a = which way its nose points compared with the track. The
+ *     track is the same for everyone, so these few numbers place a craft exactly.
+ *   - Each player writes its OWN entity: `k` (one packed JSON field: race id, f, u, a, speed,
+ *     distance raced, finish time, boost, lean) about 15 times a second, `hb` (heartbeat)
+ *     once a second, and `n`/`c` (name, color) once.
+ *   - The HOST is the lowest sessionId among live players (heartbeat seen in the last 3s),
+ *     worked out every frame. Only the host writes the shared fields `race` (id, version
+ *     `v`, phase, start and end times, results) and `bots`. A new host adopts both.
+ *   - A new race starts only when the host bumps race.id; every client then resets to
+ *     its grid slot. Someone who joins mid-race starts from the line.
+ *   - Intent: "again" {} from the results card asks the host to start the next race now.
+ *   - Other craft are drawn a little ahead of their last update (speed × time since), then
+ *     eased, so they glide instead of stepping 15 times a second.
+ *   - ?attract plays offline with bots only (the preview video is recorded from it).
+ *   - Leaderboard "best-lap": each player's fastest lap (stored as 600000 - ms, so higher
+ *     is better), shown on the results card.
+ */
+import * as THREE from "three";
+
+// ── CONFIG ──────────────────────────────────────────────────────────────────────────
+const CONFIG = {
+  laps: 3,
+  seats: 6,               // bots fill the race up to this many craft
+  vmax: 62,               // top speed, units/s (the speedometer shows ×5 as km/h)
+  accel: 26,              // thrust, units/s² (craft thrust on their own during a race)
+  turn: 2.2,              // steering, radians/s
+  brakeTurn: 1.6,         // steering multiplier while air-braking
+  brakeSpeed: 0.7,        // top speed share while air-braking
+  grip: 3.4,              // how fast your slide lines up with your nose (lower = more drift)
+  boost: 1.5,             // top speed multiplier on a boost
+  boostTime: 1.4,         // seconds one boost pad lasts
+  wallLoss: 0.55,         // share of speed lost hitting a wall head-on
+  roadWidth: 18,
+  hover: 1.2,             // how high craft float over the road
+  bank: 24,               // how far turns bank (times how sharp the turn is)
+  bankMax: 0.42,          // the steepest bank, radians
+  countdown: 5000,        // ms on the grid before GO
+  afterFirst: 25000,      // ms the race stays open after the first finisher
+  resultsFor: 12000,      // ms the results show before the next race
+  botSkill: [0.84, 0.95], // bots' top speed, as a share of vmax
+  board: "best-lap",
+  // The track: points the road passes through, [x, height, z], in order (it loops back to
+  // the first). A figure eight: the second pass crosses over the first on a bridge.
+  track: [[-40, 0, -40], [0, 0, 0], [50, 2, 50], [120, 8, 85], [185, 14, 75], [218, 20, 30], [208, 25, -10],
+    [218, 28, -50], [180, 29, -95], [110, 26, -90], [50, 22, -45], [0, 22, 0], [-50, 21, 50], [-110, 18, 90],
+    [-180, 14, 100], [-230, 10, 70], [-215, 7, 25], [-170, 5, -5], [-165, 3, -55], [-130, 1, -90], [-80, 0, -80]],
+  // Boost pads: [share of the lap where one starts, offset from the middle (left is +)]
+  pads: [[0.02, 0], [0.13, 4], [0.46, -4], [0.6, 0], [0.9, 3]],
+  padLength: 10, padWidth: 5,
+  arches: 16,             // neon arches over the road
+};
+const BOT_NAMES = ["Vega", "Nova", "Flux", "Orbit", "Pulse", "Zenith", "Quasar"];
+const COLORS = ["#ff3d6e", "#3df5ff", "#ffd23f", "#7dff6a", "#b77dff", "#ff8c42", "#ff6fd8", "#4d7dff"];
+
+// ── CONNECTION ──────────────────────────────────────────────────────────────────────
+// The builder fills these in for this game. Downloaded from GitHub? Put your own pk_ key here.
+const MP_CONNECT = {
+  key: 'pk_REPLACE_ME',
+  room: 'hover-league',
+  endpoint: 'wss://live.multiplayeragent.com',
+  apiUrl: 'https://api.multiplayeragent.com',
+};
+const ATTRACT = new URLSearchParams(location.search).has("attract");
+
+/** Same shape as the SDK client, kept in this tab: offline play and ?attract. */
+function localRoom() {
+  const id = "local", state = { entities: { players: { [id]: {} } }, shared: {} }, subs = [];
+  let queued = false;
+  const emit = () => { if (!queued) { queued = true; queueMicrotask(() => { queued = false; subs.forEach((f) => f(state)); }); } };
+  const put = (o, k, v) => { if (typeof k === "object") Object.assign(o, k); else o[k] = v; emit(); };
+  return {
+    sessionId: id, state, offline: true,
+    me: { set: (k, v) => put(state.entities.players[id], k, v) },
+    setShared: (k, v) => put(state.shared, k, v),
+    onState: (f) => { subs.push(f); f(state); }, onJoin() {}, onLeave() {}, on() {}, send() {},
+    onDisconnect() {}, onReconnect() {}, leave: async () => {},
+  };
+}
+async function connect() {
+  if (ATTRACT || typeof MP === "undefined") return localRoom();
+  try {
+    const mp = await Promise.race([MP.join({ ...MP_CONNECT }), new Promise((_, no) => setTimeout(() => no(new Error("timed out")), 10000))]);
+    window.mp = mp; // the builder calls window.mp.leave() when the page closes
+    return mp;
+  } catch (e) {
+    console.warn("Playing offline:", e && e.message);
+    return localRoom();
+  }
+}
+const parse = (v, fb) => { if (typeof v !== "string") return fb; try { return JSON.parse(v); } catch { return fb; } };
+const memo = new Map();
+/** A shared JSON field, parsed once per change (read-only: never change what this returns). */
+function shared(key, fb) {
+  const raw = S.shared[key], m = memo.get(key);
+  if (m && m.raw === raw) return m.v;
+  const v = parse(raw, fb); memo.set(key, { raw, v }); return v;
+}
+let net = null, S = { entities: { players: {} }, shared: {} }, dropped = false;
+const seenHb = new Map();
+function livePlayers() {
+  const now = performance.now(), out = [];
+  for (const [id, p] of Object.entries(S.entities.players || {})) {
+    const s = seenHb.get(id);
+    if (!s || s.hb !== p.hb) seenHb.set(id, { hb: p.hb, at: now });
+    if (id === net.sessionId || now - seenHb.get(id).at < 3000) out.push(id);
+  }
+  return out.sort();
+}
+const isHost = () => livePlayers()[0] === net.sessionId;
+
+// ── TRACK ───────────────────────────────────────────────────────────────────────────
+// N points spaced evenly along the curve. For each: P (middle of the road), T (forward),
+// LB (left, tilted by the bank), NB (the road's up), K (how sharply it turns: + = left).
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+const angle = (a) => Math.atan2(Math.sin(a), Math.cos(a));
+const curve = new THREE.CatmullRomCurve3(CONFIG.track.map(([x, y, z]) => new THREE.Vector3(x, y, z)), true, "catmullrom", 0.5);
+curve.arcLengthDivisions = 5000; // evenly spaced points, so the banking is smooth
+const N = 1000, P = curve.getSpacedPoints(N).slice(0, N), TLEN = curve.getLength(), SEG = TLEN / N;
+const half = CONFIG.roadWidth / 2, EDGE = half - 1.3; // a craft's middle can't go past EDGE
+const T = P.map((p, i) => P[(i + 1) % N].clone().sub(P[(i - 1 + N) % N]).normalize());
+const yaw = T.map((t) => Math.atan2(t.x, t.z));
+const rawK = yaw.map((y, i) => angle(yaw[(i + 1) % N] - yaw[(i - 1 + N) % N]) / (2 * SEG));
+const K = rawK.map((_, i) => { let s = 0; for (let j = -16; j <= 16; j++) s += rawK[(i + j + N) % N]; return s / 33; });
+const BANK = K.map((_, i) => { let s = 0; for (let j = -30; j <= 30; j++) s += K[(i + j + N) % N]; return clamp((s / 61) * CONFIG.bank, -CONFIG.bankMax, CONFIG.bankMax); });
+const LB = [], NB = [];
+for (let i = 0; i < N; i++) {
+  const lh = new THREE.Vector3(T[i].z, 0, -T[i].x).normalize(), n0 = new THREE.Vector3().crossVectors(T[i], lh);
+  const b = BANK[i]; // lean into the turn: the inside edge drops
+  LB.push(lh.clone().multiplyScalar(Math.cos(b)).addScaledVector(n0, -Math.sin(b)));
+  NB.push(lh.clone().multiplyScalar(Math.sin(b)).addScaledVector(n0, Math.cos(b)));
+}
+const wrapF = (f) => ((f % N) + N) % N;
+/** a - b in points, the short way round the loop. */
+const dIdx = (a, b) => { let d = (a - b) % N; if (d > N / 2) d -= N; if (d < -N / 2) d += N; return d; };
+const curv = (f) => K[Math.floor(wrapF(f))];
+const _p = new THREE.Vector3(), _t = new THREE.Vector3(), _l = new THREE.Vector3(), _n = new THREE.Vector3();
+/** The road at point f (fractional): fills _p (middle), _t (forward), _l (left), _n (up). */
+function frameAt(f) {
+  f = wrapF(f); const i = Math.floor(f), j = (i + 1) % N, r = f - i;
+  _p.lerpVectors(P[i], P[j], r); _t.lerpVectors(T[i], T[j], r).normalize();
+  _l.lerpVectors(LB[i], LB[j], r).normalize(); _n.lerpVectors(NB[i], NB[j], r).normalize();
+}
+/** The world spot at point f, u to the left of the middle, h above the road. */
+function worldAt(f, u, h, out) { frameAt(f); return out.copy(_p).addScaledVector(_l, u).addScaledVector(_n, h); }
+/** Grid slot `n` behind the start line, in track space. */
+const gridSlot = (n) => ({ d: -5 - Math.floor(n / 2) * 7, u: (n % 2 ? -1 : 1) * 3.6 });
+// Boost pads in track space: start point i0, offset u.
+const PADS = CONFIG.pads.map(([t, u]) => ({ i0: Math.floor(t * N), u }));
+function padAt(f, u) {
+  for (const p of PADS) { const d = dIdx(f, p.i0) * SEG; if (d >= 0 && d <= CONFIG.padLength && Math.abs(u - p.u) < CONFIG.padWidth / 2) return p; }
+  return null;
+}
+function padAhead(f, within) {
+  for (const p of PADS) { const d = dIdx(p.i0, f) * SEG; if (d > 0 && d < within) return p; }
+  return null;
+}
+
+// ── WORLD ───────────────────────────────────────────────────────────────────────────
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(2, devicePixelRatio || 1));
+document.body.prepend(renderer.domElement);
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog("#3a1262", 140, 700);
+const camera = new THREE.PerspectiveCamera(70, 1, 0.5, 2400);
+function fit() { renderer.setSize(innerWidth, innerHeight); camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); }
+addEventListener("resize", fit); addEventListener("orientationchange", fit); fit();
+scene.add(new THREE.HemisphereLight("#c9b8ff", "#3a1262", 1.3));
+const sun = new THREE.DirectionalLight("#ffd6f0", 1.4); sun.position.set(-60, 120, 80); scene.add(sun);
+
+function canvasTex(w, h, paint, repeat) {
+  const c = document.createElement("canvas"); c.width = w; c.height = h; paint(c.getContext("2d"), w, h);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 4;
+  if (repeat) t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  return t;
+}
+function mulberry32(a) { return () => { a |= 0; a = (a + 0x6d2b79f5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+const seeded = mulberry32(9);
+// Sky: a big dome, dark at the top, glowing pink at the horizon.
+const skyGeo = new THREE.SphereGeometry(2000, 32, 20), skyCol = [];
+const SKY = [[-1, "#12082a"], [-0.02, "#3a1262"], [0.03, "#ff4fa3"], [0.12, "#6a1f8a"], [0.4, "#1d0b45"], [1, "#05020f"]].map(([y, c]) => [y, new THREE.Color(c)]);
+for (let i = 0; i < skyGeo.attributes.position.count; i++) {
+  const y = skyGeo.attributes.position.getY(i) / 2000; let k = 1; while (k < SKY.length - 1 && SKY[k][0] < y) k++;
+  const [y0, c0] = SKY[k - 1], [y1, c1] = SKY[k], c = c0.clone().lerp(c1, clamp((y - y0) / (y1 - y0), 0, 1)); skyCol.push(c.r, c.g, c.b);
+}
+skyGeo.setAttribute("color", new THREE.Float32BufferAttribute(skyCol, 3));
+scene.add(new THREE.Mesh(skyGeo, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.BackSide, fog: false, depthWrite: false })));
+const starPos = [];
+for (let i = 0; i < 1400; i++) { const a = seeded() * Math.PI * 2, y = 0.08 + seeded() * 0.9, r = Math.sqrt(1 - y * y) * 1800; starPos.push(Math.cos(a) * r, y * 1800, Math.sin(a) * r); }
+const starGeo = new THREE.BufferGeometry(); starGeo.setAttribute("position", new THREE.Float32BufferAttribute(starPos, 3));
+scene.add(new THREE.Points(starGeo, new THREE.PointsMaterial({ color: "#ffffff", size: 2, sizeAttenuation: false, fog: false })));
+// A striped sunset sun on the horizon, and a glowing grid far below.
+const sunTex = canvasTex(256, 256, (c) => {
+  const g = c.createLinearGradient(0, 0, 0, 256); g.addColorStop(0, "#ffe66d"); g.addColorStop(0.6, "#ff4fa3"); g.addColorStop(1, "#b02bd8");
+  c.fillStyle = g; c.beginPath(); c.arc(128, 128, 126, 0, Math.PI * 2); c.fill();
+  c.globalCompositeOperation = "destination-out"; for (let k = 0; k < 7; k++) c.fillRect(0, 150 + k * 15, 256, 3 + k * 1.2);
+});
+const sunDisc = new THREE.Sprite(new THREE.SpriteMaterial({ map: sunTex, fog: false, depthWrite: false }));
+sunDisc.scale.set(520, 520, 1); sunDisc.position.set(-1500, 120, 900); scene.add(sunDisc);
+const gridTex = canvasTex(64, 64, (c) => { c.strokeStyle = "#ff3df0"; c.lineWidth = 3; c.strokeRect(0, 0, 64, 64); }, true);
+gridTex.repeat.set(90, 90);
+const floor = new THREE.Mesh(new THREE.PlaneGeometry(3600, 3600), new THREE.MeshBasicMaterial({ map: gridTex, transparent: true, opacity: 0.55 }));
+floor.rotation.x = -Math.PI / 2; floor.position.y = -90; scene.add(floor);
+
+/** A strip along the track from offset a to b (left is +), at heights ha and hb above the road. */
+function ribbon(a, b, ha, hb, mat, vScale, from = 0, to = N) {
+  const pos = [], uv = [], idx = [];
+  for (let i = from, n = 0; i <= to; i++, n++) {
+    const k = ((i % N) + N) % N, p = P[k], l = LB[k], up = NB[k], v = ((i - from) * SEG) / vScale;
+    pos.push(p.x + l.x * a + up.x * ha, p.y + l.y * a + up.y * ha, p.z + l.z * a + up.z * ha, p.x + l.x * b + up.x * hb, p.y + l.y * b + up.y * hb, p.z + l.z * b + up.z * hb);
+    uv.push(0, v, 1, v);
+    if (i < to) { const j = n * 2; idx.push(j, j + 2, j + 1, j + 1, j + 2, j + 3); }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3)); g.setAttribute("uv", new THREE.Float32BufferAttribute(uv, 2));
+  g.setIndex(idx); g.computeVertexNormals();
+  const m = new THREE.Mesh(g, mat); scene.add(m); return m;
+}
+const roadTex = canvasTex(256, 256, (c, w, h) => {
+  c.fillStyle = "#1b1142"; c.fillRect(0, 0, w, h);
+  c.strokeStyle = "#3a2a85"; c.lineWidth = 2; for (let x = 0; x <= w; x += 32) { c.beginPath(); c.moveTo(x, 0); c.lineTo(x, h); c.stroke(); }
+  c.beginPath(); c.moveTo(0, h / 2); c.lineTo(w, h / 2); c.stroke();
+  c.fillStyle = "#8c7dff"; c.fillRect(w / 2 - 3, 0, 6, h / 2);
+}, true);
+ribbon(-half, half, 0, 0, new THREE.MeshStandardMaterial({ map: roadTex, emissive: "#ffffff", emissiveMap: roadTex, emissiveIntensity: 0.45, roughness: 0.35, metalness: 0.3 }), 26);
+const hullMat = new THREE.MeshStandardMaterial({ color: "#0d0724", roughness: 0.8, side: THREE.DoubleSide });
+ribbon(half, -half, -1.4, -1.4, hullMat, 26);
+ribbon(half, half, -1.4, 0, hullMat, 26); ribbon(-half, -half, 0, -1.4, hullMat, 26);
+ribbon(half - 0.7, half, 0.03, 0.03, new THREE.MeshBasicMaterial({ color: "#3df5ff" }), 26);
+ribbon(-half, -half + 0.7, 0.03, 0.03, new THREE.MeshBasicMaterial({ color: "#ff3df0" }), 26);
+ribbon(half, half, -1.45, -1.25, new THREE.MeshBasicMaterial({ color: "#3df5ff", side: THREE.DoubleSide }), 26);
+ribbon(-half, -half, -1.25, -1.45, new THREE.MeshBasicMaterial({ color: "#ff3df0", side: THREE.DoubleSide }), 26);
+// The energy rails: see-through walls along both edges. You bounce off them.
+const railTex = canvasTex(64, 64, (c, w, h) => {
+  const g = c.createLinearGradient(0, 0, w, 0); g.addColorStop(0, "#ffffffee"); g.addColorStop(0.25, "#ffffff55"); g.addColorStop(1, "#ffffff00");
+  c.fillStyle = g; c.fillRect(0, 0, w, h); c.fillStyle = "#ffffff99"; c.fillRect(0, 0, w, 4);
+}, true);
+const railMat = (color) => new THREE.MeshBasicMaterial({ map: railTex, color, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide });
+const railL = ribbon(half, half, 0, 1.7, railMat("#3df5ff"), 6), railR = ribbon(-half, -half, 0, 1.7, railMat("#ff3df0"), 6);
+// The start line: a checkered strip on the road and a banner over it.
+const checker = canvasTex(64, 16, (c) => { for (let x = 0; x < 16; x++) for (let y = 0; y < 4; y++) { c.fillStyle = (x + y) % 2 ? "#111" : "#fff"; c.fillRect(x * 4, y * 4, 4, 4); } });
+ribbon(-half, half, 0.04, 0.04, new THREE.MeshBasicMaterial({ map: checker }), 2.5, 0, 2);
+const banner = new THREE.Mesh(new THREE.BoxGeometry(CONFIG.roadWidth + 2, 1.6, 0.4), new THREE.MeshBasicMaterial({ map: checker }));
+const basis = new THREE.Matrix4();
+frameAt(0); basis.makeBasis(_l, _n, _t); banner.quaternion.setFromRotationMatrix(basis); banner.position.copy(_p).addScaledVector(_n, 8); scene.add(banner);
+// Neon arches over the road, cyan and pink.
+const arches = new THREE.InstancedMesh(new THREE.TorusGeometry(half + 0.4, 0.3, 8, 40, Math.PI), new THREE.MeshBasicMaterial({ color: "#ffffff" }), CONFIG.arches);
+for (let k = 0; k < CONFIG.arches; k++) {
+  const i = Math.floor(((k + 0.5) / CONFIG.arches) * N); frameAt(i); basis.makeBasis(_l, _n, _t);
+  arches.setMatrixAt(k, basis.setPosition(_p)); arches.setColorAt(k, new THREE.Color(k % 2 ? "#ff3df0" : "#3df5ff"));
+}
+scene.add(arches);
+// Boost pads: arrows that slide forward.
+const padTex = canvasTex(64, 64, (c) => {
+  c.fillStyle = "#3df5ff33"; c.fillRect(0, 0, 64, 64); c.fillStyle = "#ffffff";
+  c.beginPath(); c.moveTo(6, 52); c.lineTo(32, 18); c.lineTo(58, 52); c.lineTo(46, 52); c.lineTo(32, 34); c.lineTo(18, 52); c.fill();
+}, true);
+const padMat = new THREE.MeshBasicMaterial({ map: padTex, color: "#7ff9ff", transparent: true, blending: THREE.AdditiveBlending, depthWrite: false });
+for (const p of PADS) ribbon(p.u - CONFIG.padWidth / 2, p.u + CONFIG.padWidth / 2, 0.05, 0.05, padMat, CONFIG.padWidth, p.i0, p.i0 + Math.round(CONFIG.padLength / SEG));
+// Sparks: a pool of glowing dots (boost trails, wall scrapes, pad flashes).
+const dotTex = canvasTex(32, 32, (c) => { const g = c.createRadialGradient(16, 16, 0, 16, 16, 16); g.addColorStop(0, "#fff"); g.addColorStop(1, "#fff0"); c.fillStyle = g; c.fillRect(0, 0, 32, 32); });
+const PN = 500, pPos = new Float32Array(PN * 3), pCol = new Float32Array(PN * 3), parts = Array.from({ length: PN }, () => ({ life: 0, max: 1, x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0, c: new THREE.Color() }));
+const pGeo = new THREE.BufferGeometry(); pGeo.setAttribute("position", new THREE.BufferAttribute(pPos, 3)); pGeo.setAttribute("color", new THREE.BufferAttribute(pCol, 3));
+const sparks = new THREE.Points(pGeo, new THREE.PointsMaterial({ size: 0.8, map: dotTex, vertexColors: true, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false }));
+sparks.frustumCulled = false; scene.add(sparks);
+let nextPart = 0;
+function emit(at, vel, color, n, spread, life) {
+  for (let k = 0; k < n; k++) {
+    const q = parts[nextPart]; nextPart = (nextPart + 1) % PN;
+    Object.assign(q, { life, max: life, x: at.x, y: at.y, z: at.z, vx: vel.x + (Math.random() - 0.5) * spread, vy: vel.y + (Math.random() - 0.5) * spread, vz: vel.z + (Math.random() - 0.5) * spread }); q.c.set(color);
+  }
+}
+function tickParts(dt) {
+  parts.forEach((q, i) => {
+    if (q.life > 0) { q.life -= dt; q.x += q.vx * dt; q.y += q.vy * dt; q.z += q.vz * dt; q.vx *= 1 - 2 * dt; q.vy *= 1 - 2 * dt; q.vz *= 1 - 2 * dt; }
+    const k = Math.max(0, q.life / q.max);
+    pPos.set([q.x, q.y, q.z], i * 3); pCol.set([q.c.r * k, q.c.g * k, q.c.b * k], i * 3);
+  });
+  pGeo.attributes.position.needsUpdate = pGeo.attributes.color.needsUpdate = true;
+}
+// Sound: tiny WebAudio blips, started by the first key or touch.
+let actx = null;
+function beep(freq, dur, type = "sine", vol = 0.12, to = 0) {
+  if (!actx) return;
+  const o = actx.createOscillator(), g = actx.createGain(); o.type = type; o.frequency.value = freq;
+  if (to) o.frequency.exponentialRampToValueAtTime(to, actx.currentTime + dur);
+  g.gain.setValueAtTime(vol, actx.currentTime); g.gain.exponentialRampToValueAtTime(0.001, actx.currentTime + dur);
+  o.connect(g).connect(actx.destination); o.start(); o.stop(actx.currentTime + dur);
+}
+
+// ── CRAFT ───────────────────────────────────────────────────────────────────────────
+const glowTex = canvasTex(64, 64, (c) => { const g = c.createRadialGradient(32, 32, 0, 32, 32, 32); g.addColorStop(0, "#fff"); g.addColorStop(0.5, "#fff6"); g.addColorStop(1, "#fff0"); c.fillStyle = g; c.fillRect(0, 0, 64, 64); });
+const hullShape = new THREE.Shape([[0, 2.5], [0.8, 0.4], [1.5, -1.5], [-1.5, -1.5], [-0.8, 0.4]].map(([x, y]) => new THREE.Vector2(x, y)));
+const hullGeo = new THREE.ExtrudeGeometry(hullShape, { depth: 0.4, bevelEnabled: true, bevelSize: 0.12, bevelThickness: 0.12, bevelSegments: 1 }).rotateX(Math.PI / 2).translate(0, 0.5, 0);
+const podGeo = new THREE.CylinderGeometry(0.34, 0.3, 2.6, 10).rotateX(Math.PI / 2), flameGeo = new THREE.ConeGeometry(0.3, 1.8, 10).rotateX(-Math.PI / 2).translate(0, 0, -0.9);
+const darkMat = new THREE.MeshStandardMaterial({ color: "#1c1838", roughness: 0.4, metalness: 0.6 });
+const glassMat = new THREE.MeshStandardMaterial({ color: "#0b1030", emissive: "#3df5ff", emissiveIntensity: 0.35, roughness: 0.1, metalness: 0.5 });
+function nameTag(name) {
+  const tex = canvasTex(256, 64, (c) => { c.font = "bold 34px system-ui"; c.textAlign = "center"; c.lineWidth = 6; c.strokeStyle = "#000a"; c.strokeText(name, 128, 44); c.fillStyle = "#fff"; c.fillText(name, 128, 44); });
+  const tag = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false })); tag.scale.set(5, 1.25, 1); tag.position.y = 3.2; return tag;
+}
+function makeCraft(color, name) {
+  const g = new THREE.Group(), body = new THREE.Group(); g.add(body);
+  const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.35, metalness: 0.4, emissive: color, emissiveIntensity: 0.2 });
+  body.add(new THREE.Mesh(hullGeo, mat));
+  const cockpit = new THREE.Mesh(new THREE.SphereGeometry(0.55, 16, 10), glassMat); cockpit.scale.set(1, 0.6, 1.7); cockpit.position.set(0, 0.62, 0.2); body.add(cockpit);
+  const flames = [];
+  for (const x of [-1.25, 1.25]) {
+    const pod = new THREE.Mesh(podGeo, darkMat); pod.position.set(x, 0.3, -0.5); body.add(pod);
+    const fin = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.7, 0.9), mat); fin.position.set(x * 0.7, 0.85, -1.2); fin.rotation.z = -x * 0.25; body.add(fin);
+    const flame = new THREE.Mesh(flameGeo, new THREE.MeshBasicMaterial({ color: new THREE.Color(color).lerp(new THREE.Color("#ffffff"), 0.55), transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false }));
+    flame.position.set(x, 0.3, -1.8); body.add(flame); flames.push(flame);
+  }
+  const glow = new THREE.Mesh(new THREE.PlaneGeometry(4.6, 6).rotateX(-Math.PI / 2), new THREE.MeshBasicMaterial({ map: glowTex, color, transparent: true, opacity: 0.8, blending: THREE.AdditiveBlending, depthWrite: false }));
+  glow.position.y = -CONFIG.hover + 0.1; g.add(glow);
+  if (name) g.add(nameTag(name));
+  g.userData = { body, flames };
+  scene.add(g); return g;
+}
+const _w = new THREE.Vector3(), _f = new THREE.Vector3(), _x = new THREE.Vector3();
+/** Put a craft at track point f, offset u, nose angle a; lean -1..1; boost true/false. */
+function placeCraft(g, f, u, a, lean, boost, speed, t) {
+  worldAt(f, u, CONFIG.hover + Math.sin(t * 3 + u) * 0.12, g.position);
+  _f.copy(_t).multiplyScalar(Math.cos(a)).addScaledVector(_l, Math.sin(a)).normalize();
+  _x.crossVectors(_n, _f); basis.makeBasis(_x, _n, _f); g.quaternion.setFromRotationMatrix(basis);
+  const { body, flames } = g.userData;
+  body.rotation.z = -lean * 0.4; body.rotation.x = -clamp(speed / CONFIG.vmax, 0, 1.5) * 0.05;
+  const len = 0.25 + clamp(speed / CONFIG.vmax, 0, 1) * 0.9 + (boost ? 1.1 : 0);
+  for (const fl of flames) { fl.scale.set(boost ? 1.4 : 1, boost ? 1.4 : 1, len * (0.85 + Math.random() * 0.3)); }
+}
+const views = new Map(); // id -> drawn craft for everyone but me: { g, f, u, a, ... }
+function viewOf(id, color, name) {
+  let v = views.get(id);
+  if (v && v.color !== color) { scene.remove(v.g); v.g = makeCraft(color, ATTRACT ? "" : name); v.color = color; } // they changed color
+  if (!v) { v = { g: makeCraft(color, ATTRACT ? "" : name), color, f: 0, u: 0, a: 0, raw: "", fresh: true }; views.set(id, v); }
+  return v;
+}
+/** Ease a drawn craft toward where it said it was, plus how far it has flown since. */
+function follow(v, k, dt, now, exact) {
+  if (exact) { Object.assign(v, { f: k.f, u: k.u, a: k.a }); return; }
+  const key = `${k.f},${k.u},${k.a},${k.v}`;
+  if (v.raw !== key) { Object.assign(v, { raw: key, sf: k.f, su: k.u, sa: k.a, sv: k.v || 0, at: now }); }
+  const tf = v.sf + (v.sv * Math.min(0.3, (now - v.at) / 1000)) / SEG;
+  if (v.fresh || Math.abs(dIdx(tf, v.f)) * SEG > 30) { Object.assign(v, { f: wrapF(tf), u: v.su, a: v.sa, fresh: false }); }
+  const e = 1 - Math.pow(0.002, dt);
+  v.f = wrapF(v.f + dIdx(tf, v.f) * e); v.u += (v.su - v.u) * e; v.a += angle(v.sa - v.a) * e;
+}
+
+// ── RACE (HOST) ─────────────────────────────────────────────────────────────────────
+const host = { bots: new Map(), wasHost: false, lastBots: 0, raceId: 0, last: null };
+/** The race as state has it, or the host's own newer write that hasn't come back yet. `v` only goes up. */
+function race() {
+  const r = shared("race", null);
+  return host.last && isHost() && (!r || host.last.v > r.v) ? host.last : r;
+}
+function writeRace(r) { r = { ...r, v: (race()?.v ?? 0) + 1 }; host.last = r; net.setShared("race", JSON.stringify(r)); return r; }
+const newRace = (id) => writeRace({ id, phase: "grid", startAt: Date.now() + CONFIG.countdown, endsAt: 0, results: [] });
+
+/** Everyone in this race as { id, name, d, ft }, leader first: finishers by time, then by distance raced. */
+function racers() {
+  const out = [], r = race(), live = new Set(livePlayers());
+  for (const [id, p] of Object.entries(S.entities.players || {})) {
+    if (!live.has(id)) continue;
+    if (id === net.sessionId) { out.push({ id, name: "You", d: me.d, ft: me.ft, mine: true }); continue; }
+    const k = parse(p.k, null), v = views.get(id); // plus how far they've flown since their last update
+    if (k && r && k.r === r.id) out.push({ id, name: p.n || "Player", d: k.d + (v && v.at && !k.ft ? (k.v || 0) * Math.min(0.3, (performance.now() - v.at) / 1000) : 0), ft: k.ft });
+  }
+  for (const b of botList()) out.push({ id: b.i, name: b.n, d: b.d, ft: b.ft, bot: true });
+  return out.sort((a, b) => (a.ft && b.ft ? a.ft - b.ft : a.ft ? -1 : b.ft ? 1 : b.d - a.d));
+}
+/** The bots as published: the host's live copy, or the last list it wrote. */
+function botList() {
+  if (isHost()) return [...host.bots.values()].map((b) => ({ i: b.id, n: b.name, c: b.color, f: b.f, u: b.u, a: b.a, v: b.cv, d: b.d, ft: b.ft, b: b.boost > 0 ? 1 : 0, s: b.lean, sk: b.skill }));
+  return shared("bots", []);
+}
+
+function spawnBots(humans) {
+  const want = Math.max(0, CONFIG.seats - humans.length);
+  const keep = [...host.bots.values()].slice(0, want);
+  host.bots.clear(); keep.forEach((b) => host.bots.set(b.id, b));
+  while (host.bots.size < want) {
+    const used = new Set([...host.bots.values()].map((b) => b.name)), name = BOT_NAMES.find((n) => !used.has(n)) || "Bot";
+    const id = "b" + Math.random().toString(36).slice(2, 6), [lo, hi] = CONFIG.botSkill;
+    const taken = new Set([...Object.values(S.entities.players || {}).map((p) => p.c), myColor, ...[...host.bots.values()].map((b) => b.color)]);
+    host.bots.set(id, { id, name, color: COLORS.find((c) => !taken.has(c)) || "#cccccc", skill: lo + Math.random() * (hi - lo) });
+  }
+  let n = humans.length;
+  for (const b of host.bots.values()) { const s = gridSlot(n++); Object.assign(b, { f: wrapF(s.d / SEG), u: s.u, d: s.d, v: 0, cv: 0, a: 0, lean: 0, ft: 0, boost: 0, lane: s.u * 0.5, slip: 0, seed: Math.random() * 9, padLove: Math.random() < 0.65 }); }
+}
+function adoptBots() {
+  host.bots.clear();
+  for (const b of shared("bots", [])) host.bots.set(b.i, { id: b.i, name: b.n, color: b.c, skill: b.sk || 0.88, f: b.f, u: b.u, d: b.d, v: b.v || 0, cv: b.v || 0, a: b.a || 0, lean: 0, ft: b.ft || 0, boost: 0, lane: 0, slip: 0, seed: Math.random() * 9, padLove: Math.random() < 0.65 });
+}
+
+function hostTick(dt, now) {
+  if (!host.wasHost) { host.wasHost = true; adoptBots(); } // adopt the bots exactly as state has them
+  let r = race();
+  const humans = livePlayers().filter((id) => !(ATTRACT && id === net.sessionId));
+  if (!r) r = newRace(1);
+  if (host.raceId !== r.id) { host.raceId = r.id; if (r.phase === "grid") spawnBots(humans); }
+  else if (r.phase === "grid" && host.bots.size !== Math.max(0, CONFIG.seats - humans.length)) spawnBots(humans); // someone joined or left before GO
+  const t = Date.now();
+  if (r.phase === "grid" && t >= r.startAt) r = writeRace({ ...r, phase: "race" });
+  if (r.phase === "race") {
+    const all = racers(), done = all.filter((x) => x.ft);
+    const humansDone = all.filter((x) => !x.bot && (!ATTRACT || !x.mine)).every((x) => x.ft);
+    if (done.length && !r.endsAt) r = writeRace({ ...r, endsAt: t + CONFIG.afterFirst });
+    if ((done.length && humansDone && humans.length) || (r.endsAt && t > r.endsAt) || t - r.startAt > 300000 || (ATTRACT && done.length >= 3)) {
+      r = writeRace({ ...r, phase: "done", endsAt: t + CONFIG.resultsFor, results: all.map((x) => ({ id: x.id, n: x.mine ? myName : x.name, ft: x.ft || 0 })) });
+    }
+  }
+  if (r.phase === "done" && t > r.endsAt) r = newRace(r.id + 1);
+  const lead = Math.max(0, ...racers().filter((x) => !x.bot).map((x) => x.d / TLEN));
+  for (const b of host.bots.values()) stepBot(b, dt, r, lead, now);
+  separateBots();
+  if (now - host.lastBots > 100) {
+    host.lastBots = now;
+    net.setShared("bots", JSON.stringify(botList().map((b) => ({ ...b, f: +b.f.toFixed(1), u: +b.u.toFixed(2), a: +b.a.toFixed(2), v: Math.round(b.v), d: +b.d.toFixed(1), s: +b.s.toFixed(1), sk: +b.sk.toFixed(3) }))));
+  }
+}
+/** A bot takes the inside of the turn ahead, swerves for boost pads, and now and then slips wide. */
+function stepBot(b, dt, r, lead, now) {
+  const racing = r.phase === "race" && !b.ft;
+  let du = 0;
+  if (!racing) b.v = Math.max(0, b.v - 30 * dt);
+  else {
+    const kA = curv(b.f + 28 / SEG), pad = b.padLove ? padAhead(b.f, 55) : null;
+    if (b.slip <= 0 && Math.random() < dt * 0.04) b.slip = 1.2; // a wobble: drifts wide and scrapes
+    b.slip -= dt;
+    let want = b.slip > 0 ? -Math.sign(kA || 1) * half : pad ? pad.u : clamp(kA * 220, -1, 1) * (half - 3.5) + b.lane;
+    want = clamp(want, -EDGE, EDGE);
+    du = clamp(want - b.u, -8 * dt, 8 * dt);
+    const gap = b.d / TLEN - lead;
+    const top = CONFIG.vmax * b.skill * (1 - Math.min(0.15, Math.abs(kA) * 5)) * (gap > 0.1 ? 0.93 : gap < -0.08 ? 1.06 : 1) * (b.boost > 0 ? CONFIG.boost : 1) * (b.slip > 0 && Math.abs(b.u) >= EDGE - 0.2 ? 0.8 : 1);
+    b.v += clamp(top - b.v, -30 * dt, CONFIG.accel * dt);
+  }
+  b.lane += (Math.sin(now / 1900 + b.seed) * 3 - b.lane) * dt * 0.5;
+  const ds = (b.v * dt) / clamp(1 - curv(b.f) * b.u, 0.6, 1.6);
+  b.f = wrapF(b.f + ds / SEG); b.d += ds; b.u += du; b.cv = ds / Math.max(dt, 1e-4);
+  b.a += (Math.atan2(du / Math.max(dt, 1e-4), Math.max(8, b.v)) - b.a) * Math.min(1, dt * 6);
+  b.lean += (clamp(du / Math.max(dt, 1e-4) / 8, -1, 1) - b.lean) * Math.min(1, dt * 6);
+  if (padAt(b.f, b.u)) b.boost = CONFIG.boostTime; else b.boost = Math.max(0, b.boost - dt);
+  if (racing && b.d >= CONFIG.laps * TLEN) b.ft = Date.now() - r.startAt;
+}
+/** Bots slide sideways out of each other and out of players' craft. */
+function separateBots() {
+  const bots = [...host.bots.values()], others = [{ f: me.f, u: me.u }, ...[...views.entries()].filter(([id]) => !host.bots.has(id)).map(([, v]) => v)];
+  for (let i = 0; i < bots.length; i++) {
+    const b = bots[i];
+    for (const o of [...bots.slice(i + 1), ...others]) {
+      const ds = dIdx(b.f, o.f) * SEG, du = b.u - o.u;
+      if (Math.abs(ds) > 3.6 || Math.abs(du) > 2.8) continue;
+      const push = (2.8 - Math.abs(du)) * 0.5, s = Math.sign(du) || 1;
+      b.u = clamp(b.u + s * push, -EDGE, EDGE);
+      if (host.bots.has(o.id)) o.u = clamp(o.u - s * push, -EDGE, EDGE);
+    }
+  }
+}
+
+// ── MY CRAFT ────────────────────────────────────────────────────────────────────────
+const myName = (() => { try { return localStorage.getItem("mpa-name") || ""; } catch { return ""; } })() ||
+  ["Ace", "Blaze", "Comet", "Flash", "Jet", "Spark"][Math.floor(Math.random() * 6)] + " " + (10 + Math.floor(Math.random() * 90));
+let myColor = COLORS[0]; // picked on join: the first color nobody in the room has
+/** Two people joined at once in one color: the one with the higher sessionId picks a free one. */
+function fixColor() {
+  const others = Object.entries(S.entities.players || {}).filter(([id]) => id !== net.sessionId);
+  if (!others.some(([id, p]) => p.c === myColor && id < net.sessionId)) return;
+  const taken = new Set([...others.map(([, p]) => p.c), ...botList().map((b) => b.c)]), free = COLORS.find((c) => !taken.has(c));
+  if (free) { myColor = free; net.me.set("c", free); if (me.g) { scene.remove(me.g); me.g = null; } }
+}
+// f, u, a: where I am in track space; m: the way I'm actually sliding; v: speed; d: distance raced.
+const me = { g: null, f: 0, u: 0, a: 0, m: 0, v: 0, cv: 0, d: 0, lap: 0, ft: 0, boost: 0, lean: 0, raceId: -1, lapStart: 0, best: 0, lastSend: 0, submitted: -1, wallCd: 0, bumpCd: 0, onPad: false, shake: 0 };
+const input = { left: false, right: false, brake: false, axis: 0 };
+
+/** My grid slot: my place among the live players, or the first one no other player is in. */
+function mySlot(r) {
+  const others = Object.entries(S.entities.players || {}).filter(([id]) => id !== net.sessionId).map(([, p]) => parse(p.k, null)).filter((k) => k && k.r === r.id);
+  const free = (s) => !others.some((k) => Math.abs(k.d - s.d) < 2 && Math.abs(k.u - s.u) < 2);
+  let n = Math.max(0, livePlayers().indexOf(net.sessionId));
+  while (!free(gridSlot(n)) && n < 16) n++;
+  return gridSlot(n);
+}
+function resetToGrid(r) {
+  me.raceId = r.id;
+  const slot = ATTRACT ? gridSlot(CONFIG.seats) : r.phase === "grid" ? mySlot(r) : { d: 0, u: 0 };
+  Object.assign(me, { f: wrapF(slot.d / SEG), u: slot.u, a: 0, m: 0, v: 0, cv: 0, d: slot.d, lap: 0, ft: 0, boost: 0, lapStart: r.phase === "grid" ? r.startAt : Date.now() });
+  $("over").hidden = true;
+}
+
+function myTick(dt, r, now) {
+  if (me.raceId !== r.id) resetToGrid(r);
+  const racing = r.phase === "race" && !me.ft;
+  if (ATTRACT) autopilot();
+  const steer = input.axis || (input.left ? 1 : 0) - (input.right ? 1 : 0), brake = input.brake && racing;
+  me.lean += (steer - me.lean) * Math.min(1, dt * 7);
+  if (!racing) me.v = Math.max(0, me.v - 30 * dt);
+  else {
+    const top = CONFIG.vmax * (me.boost > 0 ? CONFIG.boost : 1) * (brake ? CONFIG.brakeSpeed : 1);
+    me.v += me.v < top ? CONFIG.accel * (me.boost > 0 ? 1.8 : 1) * dt : -Math.min(me.v - top, 28 * dt);
+    me.a += steer * CONFIG.turn * (brake ? CONFIG.brakeTurn : 1) * dt * Math.min(1, me.v / 15);
+  }
+  me.boost = Math.max(0, me.boost - dt);
+  // The slide catches up with the nose; the road curving under you turns both.
+  me.m += angle(me.a - me.m) * Math.min(1, CONFIG.grip * (brake ? 0.7 : 1) * dt);
+  const k = curv(me.f), ds = (me.v * Math.cos(me.m) * dt) / clamp(1 - k * me.u, 0.6, 1.6);
+  me.f = wrapF(me.f + ds / SEG); me.d += ds; me.u += me.v * Math.sin(me.m) * dt; me.cv = ds / Math.max(dt, 1e-4);
+  me.a = angle(me.a - k * ds); me.m = angle(me.m - k * ds);
+  // The rails: bounce off, lose speed, turn the nose back along the wall.
+  if (Math.abs(me.u) > EDGE) {
+    const side = Math.sign(me.u), into = Math.sin(me.m) * side;
+    me.u = side * EDGE;
+    if (into > 0) {
+      me.v *= 1 - CONFIG.wallLoss * into;
+      if (Math.abs(me.m) < Math.PI / 2) me.m = -me.m * 0.25;
+      me.a -= side * into * 0.6;
+      if (into > 0.1 && now > me.wallCd) {
+        me.wallCd = now + 250; me.shake = Math.min(1, into * 2);
+        worldAt(me.f, me.u + side * 1.2, 0.8, _w); emit(_w, _f.set(0, 3, 0), side > 0 ? "#3df5ff" : "#ff3df0", 24, 14, 0.5); beep(110, 0.15, "square", 0.08);
+      }
+    }
+    me.v *= 1 - 0.5 * dt; // scraping
+  }
+  // Other craft: slide apart sideways.
+  for (const v of views.values()) {
+    const sd = dIdx(me.f, v.f) * SEG, du = me.u - v.u;
+    if (Math.abs(sd) > 3.4 || Math.abs(du) > 2.9) continue;
+    me.u = clamp(me.u + (Math.sign(du) || 1) * (2.9 - Math.abs(du)) * 0.6, -EDGE, EDGE); me.v *= 0.99;
+    if (now > me.bumpCd) { me.bumpCd = now + 400; me.shake = 0.4; beep(180, 0.08, "triangle", 0.08); }
+  }
+  // Boost pads
+  const onPad = racing && !!padAt(me.f, me.u);
+  if (onPad && !me.onPad) { beep(300, 0.35, "sawtooth", 0.06, 1200); toast("BOOST!", 600); worldAt(me.f, me.u, 0.5, _w); emit(_w, _f.set(0, 4, 0), "#7ff9ff", 30, 10, 0.6); }
+  if (onPad) me.boost = CONFIG.boostTime;
+  me.onPad = onPad;
+  if (racing) {
+    const lap = Math.floor(me.d / TLEN);
+    if (lap > me.lap) {
+      me.lap = lap;
+      const lapMs = Date.now() - me.lapStart; me.lapStart = Date.now();
+      if (!me.best || lapMs < me.best) me.best = lapMs;
+      if (me.lap >= CONFIG.laps) { me.ft = Date.now() - r.startAt; beep(660, 0.15); setTimeout(() => beep(880, 0.15), 140); setTimeout(() => beep(1320, 0.35), 280); toast(`Finished ${ord(racers().findIndex((x) => x.mine) + 1)}!`, 2500); }
+      else { beep(660, 0.12); setTimeout(() => beep(990, 0.18), 120); toast(me.lap === CONFIG.laps - 1 ? "Final lap!" : `Lap ${me.lap + 1}`, 1300); }
+    }
+  }
+  if (now - me.lastSend > 66) {
+    me.lastSend = now;
+    net.me.set("k", JSON.stringify({ r: me.raceId, f: +me.f.toFixed(1), u: +me.u.toFixed(2), a: +me.a.toFixed(2), v: Math.round(me.cv), d: +me.d.toFixed(1), ft: me.ft, b: me.boost > 0 ? 1 : 0, s: +me.lean.toFixed(1) }));
+  }
+}
+
+/** ?attract: your craft flies itself, taking the inside line and the pads like a bot. */
+function autopilot() {
+  const kA = curv(me.f + 28 / SEG), pad = padAhead(me.f, 50);
+  const want = pad ? pad.u : clamp(kA * 220, -1, 1) * (half - 3.5);
+  const aim = clamp((want - me.u) * 0.05, -0.35, 0.35);
+  input.axis = clamp((aim - me.a) * 5, -1, 1);
+  input.brake = Math.abs(kA) > 0.03;
+}
+
+// ── HUD & RESULTS ───────────────────────────────────────────────────────────────────
+const $ = (id) => document.getElementById(id);
+const ord = (n) => n + (n % 10 === 1 && n % 100 !== 11 ? "st" : n % 10 === 2 && n % 100 !== 12 ? "nd" : n % 10 === 3 && n % 100 !== 13 ? "rd" : "th");
+const fmt = (ms) => `${Math.floor(ms / 60000)}:${String(Math.floor((ms % 60000) / 1000)).padStart(2, "0")}.${String(Math.floor(ms % 1000)).padStart(3, "0")}`;
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+let toastTimer = 0;
+function toast(text, ms = 1500) { if (ATTRACT) return; const m = $("msg"); m.textContent = text; m.classList.add("on"); clearTimeout(toastTimer); toastTimer = setTimeout(() => m.classList.remove("on"), ms); }
+let board = null, boardFor = -1, lastCount = "", started = 0;
+function hud(r, now) {
+  const t = Date.now();
+  const count = r.phase === "grid" && r.startAt - t < 3000 ? String(Math.max(1, Math.ceil((r.startAt - t) / 1000))) : r.phase === "race" && t - r.startAt < 900 ? "GO!" : "";
+  if (count !== lastCount) { lastCount = count; if (count === "GO!") beep(880, 0.4, "square", 0.08); else if (count) beep(440, 0.15, "square", 0.08); }
+  $("count").textContent = count;
+  if (ATTRACT) { for (const id of ["pos", "lap", "speed", "net", "hint"]) $(id).textContent = ""; return; }
+  const order = racers(), at = order.findIndex((x) => x.mine) + 1;
+  $("pos").innerHTML = at ? `${ord(at)} <small>/ ${order.length}</small>` : "";
+  $("lap").textContent = me.ft ? `Finished · ${fmt(me.ft)}` : `Lap ${clamp(me.lap + 1, 1, CONFIG.laps)}/${CONFIG.laps}${me.best ? ` · best ${fmt(me.best)}` : ""}`;
+  $("speed").innerHTML = `${Math.round(me.v * 5)} <small>km/h</small><div id="boostbar"><i style="width:${Math.round((me.boost / CONFIG.boostTime) * 100)}%"></i></div>`;
+  $("hint").textContent = r.phase === "grid" && r.startAt - t >= 3000 ? "Next race starting…" : me.ft && r.phase === "race" ? "Waiting for the others…" :
+    now - started < 14000 ? (touchUI ? "◀ ▶ to steer · hold BRAKE to turn tighter · fly over the arrows" : "←/→ to steer · Shift or ↓ to air-brake · fly over the arrows") : "";
+  const n = livePlayers().length;
+  $("net").textContent = net.offline ? "Offline: playing with bots" : dropped ? "Reconnecting…" : `Online · ${n} player${n === 1 ? "" : "s"}${isHost() ? " · you run the race" : ""}`;
+  $("over").hidden = r.phase !== "done";
+  if (r.phase === "done") {
+    $("results").innerHTML = r.results.map((x) => `<li class="${x.id === net.sessionId ? "me" : ""}">${esc(x.n)}<span>${x.ft ? fmt(x.ft) : "DNF"}</span></li>`).join("");
+    $("next").textContent = `Next race in ${Math.max(0, Math.ceil((r.endsAt - t) / 1000))}s`;
+    if (boardFor !== r.id) { boardFor = r.id; showBoard(); }
+  }
+}
+function showBoard() {
+  const list = $("board");
+  if (!board) { list.innerHTML = "<li class=\"note\">Leaderboards need a connection.</li>"; return; }
+  const submit = me.best && me.submitted !== me.raceId ? board.submit(Math.max(0, 600000 - me.best)).catch(() => null) : Promise.resolve();
+  me.submitted = me.raceId;
+  submit.then(() => board.top(10)).then(({ entries }) => {
+    list.innerHTML = entries.length ? entries.map((e) => `<li>${esc(e.username || "Player")}<span>${fmt(600000 - e.score)}</span></li>`).join("") : "<li class=\"note\">No laps yet. Set the first.</li>";
+  }).catch(() => { list.innerHTML = "<li class=\"note\">Couldn't load the leaderboard.</li>"; });
+}
+function again() { const r = race(); if (r && r.phase === "done" && isHost()) newRace(r.id + 1); }
+$("again").onclick = () => { if (isHost()) again(); else net.send("again", {}); };
+
+// ── INPUT ───────────────────────────────────────────────────────────────────────────
+const touchUI = matchMedia("(pointer: coarse)").matches && !ATTRACT;
+$("padL").hidden = $("padR").hidden = !touchUI;
+document.body.classList.toggle("touch", touchUI);
+const wakeAudio = () => { if (!actx) { try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch {} } };
+const KEYS = { ArrowLeft: "left", a: "left", A: "left", ArrowRight: "right", d: "right", D: "right", ArrowDown: "brake", s: "brake", S: "brake", Shift: "brake", " ": "brake" };
+addEventListener("keydown", (e) => { wakeAudio(); const k = KEYS[e.key]; if (k) { e.preventDefault(); input[k] = true; } });
+addEventListener("keyup", (e) => { const k = KEYS[e.key]; if (k) input[k] = false; });
+for (const b of document.querySelectorAll(".pad button")) {
+  const k = b.dataset.k, on = (v) => { input[k] = v; b.classList.toggle("on", v); };
+  b.addEventListener("pointerdown", (e) => { e.preventDefault(); wakeAudio(); b.setPointerCapture(e.pointerId); on(true); });
+  for (const ev of ["pointerup", "pointercancel"]) b.addEventListener(ev, () => on(false));
+}
+renderer.domElement.addEventListener("pointerdown", wakeAudio);
+document.addEventListener("touchmove", (e) => e.preventDefault(), { passive: false });
+
+// ── MAIN LOOP ───────────────────────────────────────────────────────────────────────
+let last = performance.now(), lastHb = 0, lastHud = 0, camA = 0;
+const camUp = new THREE.Vector3(0, 1, 0), camLook = new THREE.Vector3(), UP = new THREE.Vector3(0, 1, 0);
+function frame(now) {
+  const dt = Math.max(0, Math.min(0.05, (now - last) / 1000)); last = now; // the first frame can be stamped before `last`
+  if (now - lastHb > 1000) { lastHb = now; net.me.set("hb", Date.now()); fixColor(); }
+  if (isHost()) hostTick(dt, now); else host.wasHost = false;
+  const r = race(), tSec = now / 1000;
+  if (r) myTick(dt, r, now);
+  // everyone else's craft
+  const seen = new Set(), live = new Set(livePlayers()); // a closed tab can linger in state for a while: skip it
+  for (const [id, p] of Object.entries(S.entities.players || {})) {
+    if (id === net.sessionId || !live.has(id)) continue;
+    const k = parse(p.k, null); if (!k || !r || k.r !== r.id) continue;
+    seen.add(id); const v = viewOf(id, p.c || "#ccc", p.n || "Player"); follow(v, k, dt, now, false);
+    placeCraft(v.g, v.f, v.u, v.a, k.s || 0, !!k.b, k.v || 0, tSec + id.length);
+    if (k.b && Math.random() < 0.5) boostTrail(v.g);
+  }
+  const hostBots = isHost();
+  for (const b of botList()) {
+    seen.add(b.i); const v = viewOf(b.i, b.c, b.n); follow(v, b, dt, now, hostBots);
+    placeCraft(v.g, v.f, v.u, v.a, b.s || 0, !!b.b, b.v || 0, tSec + b.i.charCodeAt(1));
+    if (b.b && Math.random() < 0.5) boostTrail(v.g);
+  }
+  for (const [id, v] of views) if (!seen.has(id)) { scene.remove(v.g); views.delete(id); }
+  // my craft
+  if (!me.g) me.g = makeCraft(myColor, "");
+  placeCraft(me.g, me.f, me.u, me.a, me.lean, me.boost > 0, me.v, tSec);
+  if (me.boost > 0) boostTrail(me.g);
+  padMat.map.offset.y -= dt * 1.5;
+  railL.material.map.offset.y -= dt * 0.6;
+  tickParts(dt);
+  // chase camera: behind the nose, tilting with the banked road
+  camA += angle(me.a * 0.6 - camA) * Math.min(1, dt * 5);
+  frameAt(me.f);
+  _f.copy(_t).multiplyScalar(Math.cos(camA)).addScaledVector(_l, Math.sin(camA)).normalize();
+  const back = (ATTRACT ? 12 : camera.aspect < 1 ? 12.5 : 10) + clamp(me.v / CONFIG.vmax, 0, 1.5) * 1.5;
+  camera.position.copy(me.g.position).addScaledVector(_f, -back).addScaledVector(_n, ATTRACT ? 5.5 : 3.8);
+  me.shake = Math.max(0, me.shake - dt * 3);
+  if (me.shake) camera.position.add(_w.set(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).multiplyScalar(me.shake * 0.8));
+  camLook.copy(me.g.position).addScaledVector(_f, 9).addScaledVector(_n, 0.8);
+  camUp.lerp(_w.copy(UP).lerp(_n, 0.5), Math.min(1, dt * 4)).normalize(); camera.up.copy(camUp);
+  camera.lookAt(camLook);
+  const fov = (camera.aspect < 1 ? 84 : 70) + (me.boost > 0 ? 12 : 0) + clamp(me.v / CONFIG.vmax, 0, 1) * 4;
+  camera.fov += (fov - camera.fov) * Math.min(1, dt * 4); camera.updateProjectionMatrix();
+  renderer.render(scene, camera);
+  if (r && now - lastHud > 100) { lastHud = now; hud(r, now); }
+  requestAnimationFrame(frame);
+}
+/** A puff of glowing dots out of a craft's thrusters. */
+function boostTrail(g) {
+  _w.set(0, 0.3, -2.6).applyQuaternion(g.quaternion).add(g.position);
+  emit(_w, _x.set(0, 0, -6).applyQuaternion(g.quaternion), "#7ff9ff", 1, 3, 0.45);
+}
+
+(async function start() {
+  net = await connect();
+  net.onState((st) => { S = st; });
+  net.on("again", () => again());
+  net.onDisconnect(() => { dropped = true; $("net").textContent = "Reconnecting…"; });
+  net.onReconnect(() => { dropped = false; });
+  if (!net.offline && typeof MP !== "undefined") board = MP.auth({ key: MP_CONNECT.key, apiUrl: MP_CONNECT.apiUrl }).leaderboard(CONFIG.board);
+  const taken = new Set([...Object.entries(S.entities.players || {}).filter(([id]) => id !== net.sessionId).map(([, p]) => p.c), ...shared("bots", []).map((b) => b.c)]);
+  myColor = COLORS.find((c) => !taken.has(c)) || COLORS[Math.floor(Math.random() * COLORS.length)];
+  net.me.set({ n: myName, c: myColor, hb: Date.now() });
+  if (ATTRACT) Object.assign(CONFIG, { countdown: 1500, resultsFor: 1500, seats: 7 });
+  started = performance.now();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

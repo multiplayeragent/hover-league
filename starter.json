@@ -1,0 +1,21 @@
+{
+  "name": "Hover League",
+  "genre": "racing",
+  "dim": "3D",
+  "mode": "Versus",
+  "players": "2–8",
+  "hook": "Neon hovercraft, banked turns, three laps.",
+  "how": "Your craft thrusts on its own: steer through the banked turns and fly over the arrow pads for a boost. Air-brake to swing round tight corners. First over the line after three laps wins.",
+  "controls": "Arrow keys or A/D to steer, Shift or Down to air-brake, or on-screen buttons",
+  "uses": [
+    ["Leaderboard", "The fastest laps on the track."],
+    ["Host-run rounds", "The host's browser starts, ends and restarts each race; if it leaves, the next player takes over."],
+    ["Bots", "Bots fill the grid until enough people join."],
+    ["Live sync", "Every craft flies for everyone at once."]
+  ],
+  "ideas": [
+    "Add a loop-the-loop to the track",
+    "Add a shield pickup that blocks one bump",
+    "Make it a desert canyon at sunset"
+  ]
+}
