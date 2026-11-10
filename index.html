@@ -184,7 +184,8 @@ function livePlayers() {
   }
   return out.sort();
 }
-const isHost = () => livePlayers()[0] === net.sessionId;
+let wakeHold = 0, lastFrameAt = 0; // a tab whose frames stopped (frozen, or in the background) doesn't act as host, nor for 700ms after it wakes (see frame())
+const isHost = () => livePlayers()[0] === net.sessionId && performance.now() >= wakeHold && !(lastFrameAt && performance.now() - lastFrameAt > 1000);
 
 // ── TRACK ───────────────────────────────────────────────────────────────────────────
 // N points spaced evenly along the curve. For each: P (middle of the road), T (forward),
@@ -696,6 +697,8 @@ let last = performance.now(), lastHb = 0, lastHud = 0, camA = 0;
 const camUp = new THREE.Vector3(0, 1, 0), camLook = new THREE.Vector3(), UP = new THREE.Vector3(0, 1, 0);
 function frame(now) {
   requestAnimationFrame(frame);
+  const realNow = performance.now(); // timed on the real clock: after a long freeze the rAF time can be from before the wake
+  if (lastFrameAt && realNow - lastFrameAt > 1000) { wakeHold = realNow + 700; host.wasHost = false; host.last = null; } lastFrameAt = realNow; // woke from a freeze or a background tab: another player may have run the race meanwhile, so let their state arrive, then adopt it like a new host
   const dt = Math.max(0, Math.min(0.05, (now - last) / 1000)); last = now; // the first frame can be stamped before `last`
   if (now - lastHb > 1000) { lastHb = now; net.me.set("hb", Date.now()); fixColor(); }
   if (isHost()) hostTick(dt, now); else host.wasHost = false;
