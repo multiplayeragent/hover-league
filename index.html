@@ -65,7 +65,7 @@
  *
  * WHERE THINGS ARE (search for the "── " headers):
  *   CONFIG ........ laps, speeds, handling, the track's shape, boost pads, bots
- *   CONNECTION .... MP_CONNECT, joining, the offline room, who is host
+ *   CONNECTION .... MP_CONNECT, joining, the offline room, who is host, the shared clock
  *   TRACK ......... the track's curve, banking, and "track space" (how far along, how far left)
  *   WORLD ......... the sky, the road, rails, arches, boost pads, sparks
  *   CRAFT ......... the hovercraft model and name tags
@@ -83,12 +83,17 @@
  *     once a second, and `n`/`c` (name, color) once.
  *   - The HOST is the lowest sessionId among live players (heartbeat seen in the last 3s),
  *     worked out every frame. Only the host writes the shared fields `race` (id, version
- *     `v`, phase, start and end times, results) and `bots`. A new host adopts both.
+ *     `v`, phase, start and end times, results), `bots` and `clk`. A new host adopts them.
+ *   - Times are on a SHARED CLOCK: the host writes `clk` (its clock) every 2 seconds and
+ *     everyone else keeps the offset, so the countdown, lap times and finish times are right
+ *     on a device whose own clock is off.
  *   - A new race starts only when the host bumps race.id; every client then resets to
  *     its grid slot. Someone who joins mid-race starts from the line.
  *   - Intent: "again" {} from the results card asks the host to start the next race now.
  *   - Other craft are drawn a little ahead of their last update (speed × time since), then
- *     eased, so they glide instead of stepping 15 times a second.
+ *     eased, so they glide instead of stepping 15 times a second. Their effects need no
+ *     messages: every client draws the boost flash and rail sparks from what it sees (viewEffects).
+ *   - After its finish a craft flies on by itself (CONFIG.cruise) until the next race starts.
  *   - ?attract plays offline with bots only (the preview video is recorded from it).
  *   - Leaderboard "best-lap": each player's fastest lap (stored as 600000 - ms, so higher
  *     is better), shown on the results card.
@@ -108,6 +113,7 @@ const CONFIG = {
   boost: 1.5,             // top speed multiplier on a boost
   boostTime: 1.4,         // seconds one boost pad lasts
   wallLoss: 0.55,         // share of speed lost hitting a wall head-on
+  cruise: 0.7,            // after the finish craft fly on by themselves, at this share of top speed
   roadWidth: 18,
   hover: 1.2,             // how high craft float over the road
   bank: 24,               // how far turns bank (times how sharp the turn is)
@@ -186,6 +192,20 @@ function livePlayers() {
 }
 let wakeHold = 0, lastFrameAt = 0; // a tab whose frames stopped (frozen, or in the background) doesn't act as host, nor for 700ms after it wakes (see frame())
 const isHost = () => livePlayers()[0] === net.sessionId && performance.now() >= wakeHold && !(lastFrameAt && performance.now() - lastFrameAt > 1000);
+// The shared clock: the host's Date.now() plus its own offset, learned from `clk` changes. Race and
+// lap times use it, so a device whose own clock is off still shows the right countdown and times.
+const clockSync = { offset: 0, seen: undefined, samples: [], lastWrite: 0 };
+const clock = () => Date.now() + clockSync.offset;
+function syncClock(now) {
+  if (isHost()) { if (now - clockSync.lastWrite > 2000) { clockSync.lastWrite = now; net.setShared("clk", clock()); } return; }
+  const clk = Number(S.shared.clk);
+  if (!clk || clk === clockSync.seen) return;
+  if (clockSync.seen !== undefined) { // the first value we see may be old; later changes are fresh
+    clockSync.samples = [...clockSync.samples.slice(-4), clk - Date.now()];
+    clockSync.offset = Math.max(...clockSync.samples); // the least-delayed sample is the best
+  }
+  clockSync.seen = clk;
+}
 
 // ── TRACK ───────────────────────────────────────────────────────────────────────────
 // N points spaced evenly along the curve. For each: P (middle of the road), T (forward),
@@ -391,8 +411,8 @@ function makeCraft(color, name) {
   }
   const glow = new THREE.Mesh(new THREE.PlaneGeometry(4.6, 6).rotateX(-Math.PI / 2), new THREE.MeshBasicMaterial({ map: glowTex, color, transparent: true, opacity: 0.8, blending: THREE.AdditiveBlending, depthWrite: false }));
   glow.position.y = -CONFIG.hover + 0.1; g.add(glow);
-  if (name) g.add(nameTag(name));
-  g.userData = { body, flames };
+  const tag = name ? nameTag(name) : null; if (tag) g.add(tag);
+  g.userData = { body, flames, tag };
   scene.add(g); return g;
 }
 const _w = new THREE.Vector3(), _f = new THREE.Vector3(), _x = new THREE.Vector3();
@@ -423,6 +443,12 @@ function follow(v, k, dt, now, exact) {
   const e = 1 - Math.pow(0.002, dt);
   v.f = wrapF(v.f + dIdx(tf, v.f) * e); v.u += (v.su - v.u) * e; v.a += angle(v.sa - v.a) * e;
 }
+/** What everyone should see another craft (a player's or a bot's) do: flash when it takes a boost pad, throw sparks while it scrapes a rail. */
+function viewEffects(v, boost, speed, dt) {
+  if (boost && v.boost === false) { worldAt(v.f, v.u, 0.5, _w); emit(_w, _f.set(0, 4, 0), "#7ff9ff", 30, 10, 0.6); } // v.boost is undefined on the frame we first see it
+  v.boost = !!boost;
+  if (Math.abs(v.u) > EDGE - 0.15 && speed > 15 && Math.random() < dt * 12) { const side = Math.sign(v.u); worldAt(v.f, v.u + side * 1.2, 0.8, _w); emit(_w, _f.set(0, 3, 0), side > 0 ? "#3df5ff" : "#ff3df0", 6, 12, 0.4); }
+}
 
 // ── RACE (HOST) ─────────────────────────────────────────────────────────────────────
 const host = { bots: new Map(), wasHost: false, lastBots: 0, raceId: 0, last: null };
@@ -432,7 +458,7 @@ function race() {
   return host.last && isHost() && (!r || host.last.v > r.v) ? host.last : r;
 }
 function writeRace(r) { r = { ...r, v: (race()?.v ?? 0) + 1 }; host.last = r; net.setShared("race", JSON.stringify(r)); return r; }
-const newRace = (id) => writeRace({ id, phase: "grid", startAt: Date.now() + CONFIG.countdown, endsAt: 0, results: [] });
+const newRace = (id) => writeRace({ id, phase: "grid", startAt: clock() + CONFIG.countdown, endsAt: 0, results: [] });
 
 /** Everyone in this race as { id, name, d, ft }, leader first: finishers by time, then by distance raced. */
 function racers() {
@@ -477,14 +503,14 @@ function hostTick(dt, now) {
   if (!r) r = newRace(1);
   if (host.raceId !== r.id) { host.raceId = r.id; if (r.phase === "grid") spawnBots(humans); }
   else if (r.phase === "grid" && host.bots.size !== Math.max(0, CONFIG.seats - humans.length)) spawnBots(humans); // someone joined or left before GO
-  const t = Date.now();
+  const t = clock();
   if (r.phase === "grid" && t >= r.startAt) r = writeRace({ ...r, phase: "race" });
   if (r.phase === "race") {
     const all = racers(), done = all.filter((x) => x.ft);
     const humansDone = all.filter((x) => !x.bot && (!ATTRACT || !x.mine)).every((x) => x.ft);
     if (done.length && !r.endsAt) r = writeRace({ ...r, endsAt: t + CONFIG.afterFirst });
     if ((done.length && humansDone && humans.length) || (r.endsAt && t > r.endsAt) || t - r.startAt > 300000 || (ATTRACT && done.length >= 3)) {
-      r = writeRace({ ...r, phase: "done", endsAt: t + CONFIG.resultsFor, results: all.map((x) => ({ id: x.id, n: x.mine ? myName : x.name, ft: x.ft || 0 })) });
+      r = writeRace({ ...r, phase: "done", endsAt: t + CONFIG.resultsFor, results: all.map((x) => ({ id: x.id, n: x.mine ? myName : x.name, ft: x.ft || 0, l: clamp(Math.floor(x.d / TLEN) + 1, 1, CONFIG.laps) })) }); // l: the lap they were on, shown for craft that hadn't finished
     }
   }
   if (r.phase === "done" && t > r.endsAt) r = newRace(r.id + 1);
@@ -500,16 +526,16 @@ function hostTick(dt, now) {
 function stepBot(b, dt, r, lead, now) {
   const racing = r.phase === "race" && !b.ft;
   let du = 0;
-  if (!racing) b.v = Math.max(0, b.v - 30 * dt);
-  else {
+  if (r.phase === "grid") b.v = Math.max(0, b.v - 30 * dt);
+  else { // after its finish (and under the results) a bot keeps flying the same line, slower, instead of parking on the track
     const kA = curv(b.f + 28 / SEG), pad = b.padLove ? padAhead(b.f, 55) : null;
-    if (b.slip <= 0 && Math.random() < dt * 0.04) b.slip = 1.2; // a wobble: drifts wide and scrapes
+    if (racing && b.slip <= 0 && Math.random() < dt * 0.04) b.slip = 1.2; // a wobble: drifts wide and scrapes
     b.slip -= dt;
     let want = b.slip > 0 ? -Math.sign(kA || 1) * half : pad ? pad.u : clamp(kA * 220, -1, 1) * (half - 3.5) + b.lane;
     want = clamp(want, -EDGE, EDGE);
     du = clamp(want - b.u, -8 * dt, 8 * dt);
     const gap = b.d / TLEN - lead;
-    const top = CONFIG.vmax * b.skill * (1 - Math.min(0.15, Math.abs(kA) * 5)) * (gap > 0.1 ? 0.93 : gap < -0.08 ? 1.06 : 1) * (b.boost > 0 ? CONFIG.boost : 1) * (b.slip > 0 && Math.abs(b.u) >= EDGE - 0.2 ? 0.8 : 1);
+    const top = !racing ? CONFIG.vmax * CONFIG.cruise : CONFIG.vmax * b.skill * (1 - Math.min(0.15, Math.abs(kA) * 5)) * (gap > 0.1 ? 0.93 : gap < -0.08 ? 1.06 : 1) * (b.boost > 0 ? CONFIG.boost : 1) * (b.slip > 0 && Math.abs(b.u) >= EDGE - 0.2 ? 0.8 : 1);
     b.v += clamp(top - b.v, -30 * dt, CONFIG.accel * dt);
   }
   b.lane += (Math.sin(now / 1900 + b.seed) * 3 - b.lane) * dt * 0.5;
@@ -517,8 +543,8 @@ function stepBot(b, dt, r, lead, now) {
   b.f = wrapF(b.f + ds / SEG); b.d += ds; b.u += du; b.cv = ds / Math.max(dt, 1e-4);
   b.a += (Math.atan2(du / Math.max(dt, 1e-4), Math.max(8, b.v)) - b.a) * Math.min(1, dt * 6);
   b.lean += (clamp(du / Math.max(dt, 1e-4) / 8, -1, 1) - b.lean) * Math.min(1, dt * 6);
-  if (padAt(b.f, b.u)) b.boost = CONFIG.boostTime; else b.boost = Math.max(0, b.boost - dt);
-  if (racing && b.d >= CONFIG.laps * TLEN) b.ft = Date.now() - r.startAt;
+  if (racing && padAt(b.f, b.u)) b.boost = CONFIG.boostTime; else b.boost = Math.max(0, b.boost - dt);
+  if (racing && b.d >= CONFIG.laps * TLEN) b.ft = Math.round(clock() - r.startAt);
 }
 /** Bots slide sideways out of each other and out of players' craft. */
 function separateBots() {
@@ -548,7 +574,7 @@ function fixColor() {
 }
 // f, u, a: where I am in track space; m: the way I'm actually sliding; v: speed; d: distance raced.
 const me = { g: null, f: 0, u: 0, a: 0, m: 0, v: 0, cv: 0, d: 0, lap: 0, ft: 0, boost: 0, lean: 0, raceId: -1, lapStart: 0, best: 0, lastSend: 0, submitted: -1, wallCd: 0, bumpCd: 0, onPad: false, shake: 0 };
-const input = { left: false, right: false, brake: false, axis: 0 };
+const input = { left: false, right: false, brake: false };
 
 /** My grid slot: my place among the live players, or the first one no other player is in. */
 function mySlot(r) {
@@ -561,22 +587,23 @@ function mySlot(r) {
 function resetToGrid(r) {
   me.raceId = r.id;
   const slot = ATTRACT ? gridSlot(CONFIG.seats) : r.phase === "grid" ? mySlot(r) : { d: 0, u: 0 };
-  Object.assign(me, { f: wrapF(slot.d / SEG), u: slot.u, a: 0, m: 0, v: 0, cv: 0, d: slot.d, lap: 0, ft: 0, boost: 0, lapStart: r.phase === "grid" ? r.startAt : Date.now() });
+  Object.assign(me, { f: wrapF(slot.d / SEG), u: slot.u, a: 0, m: 0, v: 0, cv: 0, d: slot.d, lap: 0, ft: 0, boost: 0, lapStart: r.phase === "grid" ? r.startAt : clock() });
   $("over").hidden = true;
 }
 
 function myTick(dt, r, now) {
   if (me.raceId !== r.id) resetToGrid(r);
   const racing = r.phase === "race" && !me.ft;
-  if (ATTRACT) autopilot();
-  const steer = input.axis || (input.left ? 1 : 0) - (input.right ? 1 : 0), brake = input.brake && racing;
+  const cruise = r.phase !== "grid" && !racing; // past the finish, or the race is over: the craft flies itself on, slower, instead of sliding into a wall and parking on the track
+  const auto = ATTRACT || cruise ? autopilot() : null;
+  const steer = auto ? auto.steer : (input.left ? 1 : 0) - (input.right ? 1 : 0), brake = (auto ? auto.brake : input.brake) && racing;
   me.lean += (steer - me.lean) * Math.min(1, dt * 7);
-  if (!racing) me.v = Math.max(0, me.v - 30 * dt);
+  if (!racing) me.v += clamp((cruise ? CONFIG.vmax * CONFIG.cruise : 0) - me.v, -30 * dt, 30 * dt);
   else {
     const top = CONFIG.vmax * (me.boost > 0 ? CONFIG.boost : 1) * (brake ? CONFIG.brakeSpeed : 1);
     me.v += me.v < top ? CONFIG.accel * (me.boost > 0 ? 1.8 : 1) * dt : -Math.min(me.v - top, 28 * dt);
-    me.a += steer * CONFIG.turn * (brake ? CONFIG.brakeTurn : 1) * dt * Math.min(1, me.v / 15);
   }
+  me.a += steer * CONFIG.turn * (brake ? CONFIG.brakeTurn : 1) * dt * Math.min(1, me.v / 15);
   me.boost = Math.max(0, me.boost - dt);
   // The slide catches up with the nose; the road curving under you turns both.
   me.m += angle(me.a - me.m) * Math.min(1, CONFIG.grip * (brake ? 0.7 : 1) * dt);
@@ -614,9 +641,9 @@ function myTick(dt, r, now) {
     const lap = Math.floor(me.d / TLEN);
     if (lap > me.lap) {
       me.lap = lap;
-      const lapMs = Date.now() - me.lapStart; me.lapStart = Date.now();
+      const lapMs = Math.round(clock() - me.lapStart); me.lapStart = clock();
       if (!me.best || lapMs < me.best) me.best = lapMs;
-      if (me.lap >= CONFIG.laps) { me.ft = Date.now() - r.startAt; beep(660, 0.15); setTimeout(() => beep(880, 0.15), 140); setTimeout(() => beep(1320, 0.35), 280); toast(`Finished ${ord(racers().findIndex((x) => x.mine) + 1)}!`, 2500); }
+      if (me.lap >= CONFIG.laps) { me.ft = Math.round(clock() - r.startAt); beep(660, 0.15); setTimeout(() => beep(880, 0.15), 140); setTimeout(() => beep(1320, 0.35), 280); toast(`Finished ${ord(racers().findIndex((x) => x.mine) + 1)}!`, 2500); }
       else { beep(660, 0.12); setTimeout(() => beep(990, 0.18), 120); toast(me.lap === CONFIG.laps - 1 ? "Final lap!" : `Lap ${me.lap + 1}`, 1300); }
     }
   }
@@ -626,13 +653,12 @@ function myTick(dt, r, now) {
   }
 }
 
-/** ?attract: your craft flies itself, taking the inside line and the pads like a bot. */
+/** Your craft flying itself (?attract, and after the finish): the inside line and the pads, like a bot. Returns { steer, brake }. */
 function autopilot() {
   const kA = curv(me.f + 28 / SEG), pad = padAhead(me.f, 50);
   const want = pad ? pad.u : clamp(kA * 220, -1, 1) * (half - 3.5);
   const aim = clamp((want - me.u) * 0.05, -0.35, 0.35);
-  input.axis = clamp((aim - me.a) * 5, -1, 1);
-  input.brake = Math.abs(kA) > 0.03;
+  return { steer: clamp((aim - me.a) * 5, -1, 1), brake: Math.abs(kA) > 0.03 };
 }
 
 // ── HUD & RESULTS ───────────────────────────────────────────────────────────────────
@@ -644,7 +670,7 @@ let toastTimer = 0;
 function toast(text, ms = 1500) { if (ATTRACT) return; const m = $("msg"); m.textContent = text; m.classList.add("on"); clearTimeout(toastTimer); toastTimer = setTimeout(() => m.classList.remove("on"), ms); }
 let board = null, boardFor = -1, lastCount = "", started = 0;
 function hud(r, now) {
-  const t = Date.now();
+  const t = clock();
   const count = r.phase === "grid" && r.startAt - t < 3000 ? String(Math.max(1, Math.ceil((r.startAt - t) / 1000))) : r.phase === "race" && t - r.startAt < 900 ? "GO!" : "";
   if (count !== lastCount) { lastCount = count; if (count === "GO!") beep(880, 0.4, "square", 0.08); else if (count) beep(440, 0.15, "square", 0.08); }
   $("count").textContent = count;
@@ -659,7 +685,7 @@ function hud(r, now) {
   $("net").textContent = net.offline ? "Offline: playing with bots" : dropped ? "Reconnecting…" : `Online · ${n} player${n === 1 ? "" : "s"}${isHost() ? " · you run the race" : ""}`;
   $("over").hidden = r.phase !== "done";
   if (r.phase === "done") {
-    $("results").innerHTML = r.results.map((x) => `<li class="${x.id === net.sessionId ? "me" : ""}">${esc(x.n)}<span>${x.ft ? fmt(x.ft) : "DNF"}</span></li>`).join("");
+    $("results").innerHTML = r.results.map((x) => `<li class="${x.id === net.sessionId ? "me" : ""}">${esc(x.n)}<span>${x.ft ? fmt(x.ft) : x.l ? `lap ${x.l}/${CONFIG.laps}` : "DNF"}</span></li>`).join("");
     $("next").textContent = `Next race in ${Math.max(0, Math.ceil((r.endsAt - t) / 1000))}s`;
     if (boardFor !== r.id) { boardFor = r.id; showBoard(); }
   }
@@ -684,6 +710,7 @@ const wakeAudio = () => { if (!actx) { try { actx = new (window.AudioContext || 
 const KEYS = { ArrowLeft: "left", a: "left", A: "left", ArrowRight: "right", d: "right", D: "right", ArrowDown: "brake", s: "brake", S: "brake", Shift: "brake", " ": "brake" };
 addEventListener("keydown", (e) => { wakeAudio(); const k = KEYS[e.key]; if (k) { e.preventDefault(); input[k] = true; } });
 addEventListener("keyup", (e) => { const k = KEYS[e.key]; if (k) input[k] = false; });
+addEventListener("blur", () => { input.left = input.right = input.brake = false; }); // a key held while the tab loses focus never sends its keyup
 for (const b of document.querySelectorAll(".pad button")) {
   const k = b.dataset.k, on = (v) => { input[k] = v; b.classList.toggle("on", v); };
   b.addEventListener("pointerdown", (e) => { e.preventDefault(); wakeAudio(); b.setPointerCapture(e.pointerId); on(true); });
@@ -701,6 +728,7 @@ function frame(now) {
   if (lastFrameAt && realNow - lastFrameAt > 1000) { wakeHold = realNow + 700; host.wasHost = false; host.last = null; } lastFrameAt = realNow; // woke from a freeze or a background tab: another player may have run the race meanwhile, so let their state arrive, then adopt it like a new host
   const dt = Math.max(0, Math.min(0.05, (now - last) / 1000)); last = now; // the first frame can be stamped before `last`
   if (now - lastHb > 1000) { lastHb = now; net.me.set("hb", Date.now()); fixColor(); }
+  syncClock(now);
   if (isHost()) hostTick(dt, now); else host.wasHost = false;
   const r = race(), tSec = now / 1000;
   if (r) myTick(dt, r, now);
@@ -712,12 +740,14 @@ function frame(now) {
     seen.add(id); const v = viewOf(id, p.c || "#ccc", p.n || "Player"); follow(v, k, dt, now, false);
     placeCraft(v.g, v.f, v.u, v.a, k.s || 0, !!k.b, k.v || 0, tSec + id.length);
     if (k.b && Math.random() < 0.5) boostTrail(v.g);
+    viewEffects(v, k.b, k.v || 0, dt);
   }
   const hostBots = isHost();
   for (const b of botList()) {
     seen.add(b.i); const v = viewOf(b.i, b.c, b.n); follow(v, b, dt, now, hostBots);
     placeCraft(v.g, v.f, v.u, v.a, b.s || 0, !!b.b, b.v || 0, tSec + b.i.charCodeAt(1));
     if (b.b && Math.random() < 0.5) boostTrail(v.g);
+    viewEffects(v, b.b, b.v || 0, dt);
   }
   for (const [id, v] of views) if (!seen.has(id)) { scene.remove(v.g); views.delete(id); }
   // my craft
@@ -740,6 +770,11 @@ function frame(now) {
   camera.lookAt(camLook);
   const fov = (camera.aspect < 1 ? 84 : 70) + (me.boost > 0 ? 12 : 0) + clamp(me.v / CONFIG.vmax, 0, 1) * 4;
   camera.fov += (fov - camera.fov) * Math.min(1, dt * 4); camera.updateProjectionMatrix();
+  for (const v of views.values()) { // name tags: the same size on screen once a craft is close, and gone when it is right at the camera (a craft tailing you)
+    const tag = v.g.userData.tag; if (!tag) continue;
+    const d = v.g.position.distanceTo(camera.position), s = clamp(d / 28, 0.3, 1);
+    tag.scale.set(5 * s, 1.25 * s, 1); tag.material.opacity = clamp((d - 7) / 5, 0, 1);
+  }
   renderer.render(scene, camera);
   if (r && now - lastHud > 100) { lastHud = now; hud(r, now); }
 }
